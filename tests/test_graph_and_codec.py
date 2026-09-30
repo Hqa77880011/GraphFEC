@@ -17,7 +17,7 @@ from graphfec.graph import (
     laplacian,
     sparsify,
 )
-from graphfec.system import BASELINES, VARIANTS, Protection
+from graphfec.system import BASELINES, Protection
 from graphfec.transport import HEADER, decode_datagrams, encode_datagrams
 
 
@@ -132,7 +132,10 @@ def test_unequal_protection_recovers_high_group_and_fills_unresolved_low_group()
     np.testing.assert_array_equal(result[2], np.full(10, 99, dtype=np.uint8))
 
 
-@pytest.mark.parametrize("method", VARIANTS + BASELINES)
+@pytest.mark.parametrize(
+    "method",
+    ("graphfec", "random", "cluster", "no_parity", "no_refinement", "neural_only") + BASELINES,
+)
 def test_lossless_reception_preserves_quantized_activation(method):
     cfg = Config(packets=4, parity=2, neighbors=3, sparsity=3)
     protection = Protection(cfg, example_profile(), method).eval()
@@ -142,7 +145,7 @@ def test_lossless_reception_preserves_quantized_activation(method):
     torch.testing.assert_close(actual, protection.quantizer.decode(protection.quantizer.encode(z)))
 
 
-def test_parity_and_refiner_receive_task_gradients_and_cache_matches():
+def test_parity_and_refiner_receive_recovery_gradients_and_cache_matches():
     torch.manual_seed(4)
     cfg = Config(packets=4, parity=2, neighbors=3, sparsity=3, bottleneck=4)
     protection = Protection(cfg, example_profile())

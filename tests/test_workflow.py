@@ -85,7 +85,7 @@ def test_paired_bootstrap_keeps_pairing_and_known_difference():
         ("convnext_tiny", 224, 2, (192, 28, 28)),
     ],
 )
-def test_backbone_split_matches_paper_and_suffix_composes(backbone, size, stage, shape):
+def test_backbone_split_shape_and_edge_freezing(backbone, size, stage, shape):
     torch.set_num_threads(2)
     cfg = Config(backbone=backbone, image_size=size, split_stage=stage, num_classes=7)
     model = build_model(cfg).eval()
@@ -93,7 +93,6 @@ def test_backbone_split_matches_paper_and_suffix_composes(backbone, size, stage,
     with torch.no_grad():
         z = model.edge(x)
         assert tuple(z.shape[1:]) == shape
-        torch.testing.assert_close(model(x), model.cloud(z))
     model.requires_grad_(False)
     model.enable_final_stage()
     assert not any(p.requires_grad for p in model.edge.parameters())

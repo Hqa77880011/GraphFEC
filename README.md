@@ -6,7 +6,7 @@ PyTorch implementation of **GraphFEC: Correlation-Graph-Coded Activation Transmi
 
 GraphFEC protects the intermediate activation of a split classifier. A channel correlation graph guides balanced packet assignment and sparse parity coding. The receiver combines a regularized linear solve with two graph refinement blocks before running the cloud classifier.
 
-The repository includes dataset preparation, clean-model training, calibration, recovery training, baseline and ablation comparisons, packet serialization, evaluation, and plotting. Start with the small CPU workflow below, then follow the numbered sections for an experiment on real data.
+The workflow is: prepare data → train the classifier → calibrate the graph and quantizer → train recovery → evaluate and plot. CIFAR-100, Tiny ImageNet-200, and ImageNet-100 configurations are included.
 
 ## Installation
 
@@ -26,14 +26,15 @@ Install a matching PyTorch and TorchVision pair using the [PyTorch installation 
 
 ```bash
 python -m pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cpu
-python -m pip install -e ".[dev]"
-pytest -q
+python -m pip install -e .
 graphfec smoke --output runs/smoke
 ```
 
-The smoke command uses generated color-pattern images and a tiny CNN. It runs one clean epoch, one recovery epoch and one fine-tuning epoch per variant, then exercises every baseline, evaluation, packet roundtrip, local timing, and plotting. Its outputs are functional-check data, not classification benchmark results. No dataset download is needed. CI runs this workflow on Python 3.11 and 3.13.
+The smoke command checks the complete pipeline on CPU using generated images and a tiny CNN. It runs one epoch per training phase, evaluates the methods, and writes outputs to `runs/smoke/`. The generated data are for functional checks; no dataset download is needed.
 
-`python -m graphfec` is equivalent to `graphfec`. All commands below run from the repository root. Outputs are written under `runs/` and excluded from Git.
+`python -m graphfec` is equivalent to `graphfec`. Run the commands below from the repository root. Use `graphfec --help` or, for example, `graphfec evaluate --help` to list options.
+
+Training and calibration save to `run_dir`; inference, evaluation, and timing also accept `--output`. Repeating a command replaces its named output files. Use separate directories for experiments you want to keep. Data and generated outputs are excluded from Git.
 
 ## 1. Prepare data
 
@@ -59,7 +60,7 @@ Download from the [Stanford Tiny ImageNet archive](https://cs231n.stanford.edu/t
 graphfec prepare --config configs/tinyimagenet.json --download
 ```
 
-You can also extract the archive into `data/tiny-imagenet-200/` yourself and omit `--download`. The loader reads `train/<wnid>/images/`, `val/images/`, and `val/val_annotations.txt` directly; it does not move images.
+For an existing download, extract the archive into `data/tiny-imagenet-200/` and omit `--download`. The loader reads `train/<wnid>/images/`, `val/images/`, and `val/val_annotations.txt` in place.
 
 ### ImageNet-100
 
@@ -79,6 +80,8 @@ graphfec prepare --config configs/imagenet100.json
 
 By default, this selects the first 100 lexicographically sorted training class folders. To use a specific subset, supply `--classes classes.txt`, with one class folder name per line. The supplied order defines the labels. The selected classes and image paths are saved to `data_root/manifest.json`.
 
+To use a different data location, add `--set data_root=/path/to/dataset` to preparation and subsequent commands. Keep the same manifest throughout an experiment so that class labels and holdouts stay consistent.
+
 For all datasets, a fixed, class-stratified 10% holdout of the original training set is used for validation. CIFAR's original test set and the original labeled validation sets of Tiny ImageNet/ImageNet are used as test data. Graph and quantization calibration use only the remaining training partition. Gradient saliency for UEP uses the holdout. The split seed is independent of the model seed and stays fixed across methods.
 
 ## 2. Train the clean classifier
@@ -89,7 +92,7 @@ graphfec train-clean --config configs/cifar100.json
 
 This trains from scratch with SGD, momentum 0.9 and cosine decay, and saves the best validation checkpoint as `runs/cifar100/clean.pt`. The history is in `clean_history.csv`. The CIFAR ResNet uses a 3 × 3 stride-one stem without max pooling. Training uses random crops and horizontal flips; evaluation uses deterministic resizing/center cropping. All image datasets use ImageNet channel normalization.
 
-Use the other configuration paths for their corresponding dataset and backbone. `device=auto` selects CUDA when available; `--set device=cpu` forces CPU. ConvNeXt defaults to batch size 32 to limit memory use. The full schedules are intended for a GPU; the smoke command is the quick CPU check.
+Use the other configuration paths for their corresponding dataset and backbone. `device=auto` selects CUDA when available; `--set device=cpu` forces CPU. Full training is intended for a GPU. Batch size is 128 for CIFAR-100 and Tiny ImageNet, and 32 for ConvNeXt. Reduce it with `--set batch_size=16` if needed.
 
 ## 3. Calibrate the protection profile
 
@@ -99,7 +102,7 @@ graphfec calibrate --config configs/cifar100.json
 
 This computes global-average-pooled channel statistics, EMA and full-sample absolute Pearson correlations, channel minima/maxima/means, and validation gradient saliency. The result is `profile.pt`, which also contains the clean classifier. Calibration selects at most 4,096 training examples and 1,024 validation examples, deterministically and without augmentation.
 
-The sparse graph keeps the strongest `neighbors` edges per channel and uses the union of both directions. The interleaver visits channels by descending weighted degree, minimizes within-packet affinity plus a balance term, and pads each packet to `ceil(C / M)` channels. Packet-graph neighborhoods initialize the support of each parity row; the coefficients are learned with unit L2 row norm.
+The profile fixes the channel graph, packet assignment, and quantization ranges used during recovery training and inference. Calibration must finish before running `train-recovery` or any baseline.
 
 ## 4. Train GraphFEC
 
@@ -111,13 +114,22 @@ The clean backbone stays frozen for 120 epochs. The final cloud feature stage an
 
 Validation uses fixed masks at 10% Bernoulli loss. The best checkpoint is `graphfec.pt`; `graphfec_history.csv` records the phase, training loss, and validation accuracy. Checkpoints contain the classifier, graph statistics, quantizer, packet map, parity weights, refiner weights, configuration, and a profile UUID.
 
+The default CIFAR-100 run produces these checkpoints:
+
+| File | Created by | Used by |
+|---|---|---|
+| `runs/cifar100/clean.pt` | `train-clean` | `calibrate` |
+| `runs/cifar100/profile.pt` | `calibrate` | Recovery training and all baselines |
+| `runs/cifar100/graphfec.pt` | `train-recovery --variants graphfec` | GraphFEC inference, evaluation, and timing |
+| `runs/cifar100/<variant>.pt` | `train-recovery --variants <variant>` | The corresponding ablation |
+
 ## 5. Execute a protected inference
 
 ```bash
 graphfec infer --config configs/cifar100.json --loss 0.1 --channel gilbert
 ```
 
-This selects one test image, runs the edge, serializes the packets, applies erasures, parses surviving packets, restores the activation, and runs the cloud. To use your own image, add `--image path/to/image.jpg`. `--method rs` or another method selects a baseline.
+This runs one test image through packet encoding, simulated loss, recovery, and cloud classification. Add `--image path/to/image.jpg` to use your own image, or `--method rs` to select a baseline. Image preprocessing and labels follow the prepared dataset; `prediction` is the class index in `manifest.json`. Set `--trace-seed` to change the sampled erasures.
 
 Files in `runs/cifar100/inference/`:
 
@@ -127,7 +139,7 @@ Files in `runs/cifar100/inference/`:
 | `packets.bin` | Transmitted datagrams, each preceded by a four-byte little-endian length |
 | `activations.npz` | Clean and recovered activations and the received-packet mask |
 
-The packet API is in `graphfec.transport`. Each datagram has a 42-byte header containing format version, profile UUID, sample ID, packet index/count, activation shape, payload length, and CRC32. The file's length prefixes are container metadata and are not included in reported datagram bytes. Parsing rejects mixed profiles, mismatched samples/shapes, duplicate indices and corrupt payloads. The included execution path is local; networking is managed by the application using these datagrams.
+`graphfec.transport` provides the packet serialization API. Each datagram has a 42-byte header containing format version, profile UUID, sample ID, packet index/count, activation shape, payload length, and CRC32. Reported bytes include these headers and exclude the file's four-byte length prefixes. Parsing checks the profile, sample, shape, packet index, and checksum. `infer` runs locally; an application can send the same datagrams through its own transport.
 
 ## 6. Compare baselines and evaluate
 
@@ -135,6 +147,8 @@ The packet API is in `graphfec.transport`. Each datagram has a 42-byte header co
 graphfec evaluate --config configs/cifar100.json --methods graphfec,none,rs,rlc,uep --trace-seeds 10017,10029,10043
 graphfec plot --input runs/cifar100/evaluation_test/summary.csv --output runs/cifar100/figures
 ```
+
+The default comparison requires `graphfec.pt` and `profile.pt`. To evaluate only the baselines after calibration, use `--methods none,rs,rlc,uep`; they do not require recovery training.
 
 The default loss rates are 0%, 1%, 5%, 10%, 20%, and 30%, under both Bernoulli and Gilbert loss. Gilbert bad-state duration has mean four packets, with stationary initialization and transition probabilities `P(B→G)=0.25`, `P(G→B)=0.25p/(1-p)`. Each example is an independent stationary sequence. Input order and reception-mask prefixes are shared across methods, and evaluation seeds are separate from training seeds.
 
@@ -158,24 +172,26 @@ Evaluation writes:
 | `paired_comparisons.csv` | GraphFEC minus each method in percentage points, with a paired stratified bootstrap interval |
 | `evaluation.json` | Configuration, split, sample limit, trace seeds and bootstrap settings |
 
-Accuracy is stored as a fraction. MAE and cosine compare recovered activations with the unquantized clean activation. A no-loss MAE therefore includes quantization error. `clean_accuracy` and `quantized_accuracy` use the same cloud suffix as that row's method; fine-tuned variants can have different clean references. Bootstrap intervals describe example uncertainty conditional on a trained checkpoint and trace, not uncertainty across training seeds. The plots average the supplied run/trace rows and do not invent confidence bands.
+Accuracy is stored as a fraction; `gain_pp` is the GraphFEC accuracy gain in percentage points. MAE and cosine compare recovered activations with the unquantized activation, so no-loss MAE includes quantization error. `clean_accuracy` and `quantized_accuracy` use each method's own cloud suffix. Fine-tuned variants can therefore have different clean references.
 
-Use `--split val` for parameter selection; keep test data for the final evaluation. `--limit 100 --bootstrap 200` is useful for a short functional run, not a final accuracy estimate. No results or model weights are prefilled in the repository.
+The default confidence intervals use 10,000 label-stratified bootstrap resamples for each checkpoint and trace. A positive interval in `paired_comparisons.csv` indicates a GraphFEC gain for that setting. Training-seed variation is evaluated with separate runs. Plots show arithmetic means across the supplied run/trace rows; combine files only when their dataset, split, and byte budget match.
+
+Use `--split val` for parameter selection and `--split test` for final evaluation. For a short check, add `--limit 100 --bootstrap 200`. Plotting writes `<channel>_metrics.png` and `.pdf`, plus `component_comparison.png` when 10% Bernoulli results are available.
 
 For a recorded loss trace:
 
 ```bash
-graphfec evaluate --config configs/cifar100.json --methods graphfec,rs --trace path/to/erasures.csv
+graphfec evaluate --config configs/cifar100.json --methods graphfec,rs --trace path/to/erasures.csv --output runs/cifar100/trace_evaluation
 ```
 
-Provide headerless values `0` (received) and `1` (erased), separated by commas or, for a `.txt` file, whitespace. The trace needs at least `number_of_examples × (M+R)` events, or `number_of_examples × 2M` when duplication is included. It is consumed in example-major packet order without repetition or loss-rate rescaling; the actual observed loss is reported. No mobile/Wi-Fi trace is bundled.
+Provide your recorded trace as headerless values `0` (received) and `1` (erased), separated by commas or, for a `.txt` file, whitespace. The trace needs at least `number_of_examples × (M+R)` events, or `number_of_examples × 2M` when duplication is included. It is consumed in example-major packet order at its recorded loss rate. `observed_loss` reports the fraction actually erased; trace rows use `loss_rate=-1` to indicate that no synthetic loss rate was requested.
 
 ## 7. Run ablations and sensitivity studies
 
 ```bash
 graphfec train-recovery --config configs/cifar100.json --variants all
-graphfec evaluate --config configs/cifar100.json --methods all
-graphfec plot --input runs/cifar100/evaluation_test/summary.csv --output runs/cifar100/figures
+graphfec evaluate --config configs/cifar100.json --methods all --output runs/cifar100/ablations
+graphfec plot --input runs/cifar100/ablations/summary.csv --output runs/cifar100/ablation_figures
 ```
 
 Each variant starts from the same calibrated clean checkpoint and is trained independently:
@@ -190,7 +206,7 @@ Each variant starts from the same calibrated clean checkpoint and is trained ind
 | `task_only` | Use cross-entropy alone |
 | `static_graph` | Use full-sample calibration moments instead of EMA moments |
 
-`all` includes GraphFEC and every listed variant; the evaluation also includes `none`, `rs`, `rlc`, and `uep`. Missing trained checkpoints are an error. The no-parity ablation transmits fewer bytes; duplication transmits more. Their actual budgets are reported rather than represented as matched-budget comparisons.
+`all` trains GraphFEC and every listed variant. Evaluation also includes `none`, `rs`, `rlc`, and `uep`. To run a subset, use a comma-separated list such as `--variants random,no_refinement`. Each evaluated variant needs its own checkpoint. Check `transmitted_bytes` when comparing methods: `no_parity` sends fewer bytes and duplication sends twice the data payload.
 
 For sensitivity studies, change one configuration field and use a separate run directory. For example, train a 10% redundancy model while reusing the clean classifier:
 
@@ -212,14 +228,17 @@ graphfec benchmark --config configs/cifar100.json --methods graphfec,none,rs,rlc
 
 The benchmark uses batch size one and paired inputs/masks. Synchronized monotonic timing covers edge, encoder, decoder and cloud computation, including any CPU transfers used by GF(256). It excludes image loading, serialization and networking. `benchmark/raw.csv` retains warm-up rows; `summary.csv` reports mean encoding/decoding time, median/P95/P99 compute latency, and serial compute throughput. Increase sample count for meaningful tail estimates. Device and timing scope are recorded in `metadata.json`.
 
-Energy and network throughput require measurements on the target hardware. This code does not infer energy or claim the paper's Jetson/RTX testbed timings from local compute measurements.
-
 ## Important configuration fields
 
-Every command accepts repeated `--set key=value` overrides. Strings may be unquoted; lists use JSON, e.g. `--set 'loss_rates=[0.0,0.1,0.2]'`. Unknown fields are rejected. Full defaults are in `src/graphfec/config.py`.
+Commands that take `--config` also accept repeated `--set key=value` overrides. Strings may be unquoted; lists use JSON, e.g. `--set 'loss_rates=[0.0,0.1,0.2]'`. Full defaults are in [`src/graphfec/config.py`](src/graphfec/config.py); the dataset JSON files override selected values.
 
 | Field | Default | Meaning |
 |---|---|---|
+| `data_root`, `run_dir` | Dataset configuration | Dataset location and checkpoint/history directory |
+| `device`, `batch_size` | `auto`, 128 | Compute device and training/evaluation batch size; ImageNet-100 uses 32 |
+| `clean_epochs`, `clean_lr` | 200, 0.1 | Clean-classifier schedule; Tiny ImageNet and ImageNet-100 use learning rate 0.05 |
+| `recovery_epochs`, `finetune_epochs` | 120, 20 | Frozen-backbone and final-cloud-stage training epochs |
+| `recovery_lr`, `weight_decay` | 0.0003, 0.0001 | Recovery optimizer settings |
 | `packets`, `parity` | 20, 4 | Data and parity packets; redundancy is `R/M` |
 | `neighbors`, `beta` | 8, 0.95 | Per-channel top-k graph and EMA coefficient |
 | `balance`, `sparsity` | 0.1, 8 | Interleaver balance cost and max nonzeros per parity row |
@@ -229,20 +248,28 @@ Every command accepts repeated `--set key=value` overrides. Strings may be unquo
 | `lambda_l1`, `lambda_cos`, `lambda_kd` | 1, 1, 1 | Auxiliary loss weights |
 | `temperature` | 2 | Distillation temperature |
 | `calibration_samples`, `saliency_samples` | 4096, 1024 | Calibration and validation-saliency limits |
+| `train_channel`, `loss_rates` | `mixed`, [0, 0.01, 0.05, 0.1, 0.2, 0.3] | Training channel mixture and loss probabilities; evaluation uses the same rate list |
 | `seed`, `split_seed` | 17, 2026 | Training randomness and fixed data partition |
 | `workers`, `threads` | 0, 4 | DataLoader workers and CPU PyTorch threads |
 
-## Implementation choices
+## Implementation details
 
-These choices fill details not fixed by the paper and affect interpretation of results:
+**Graph and packet assignment.** Absolute Pearson correlations are computed from batch first/second moments with EMA updates. The sparse graph takes the union of each channel's top-k edges. Channels are visited in descending weighted degree and assigned by within-packet affinity plus a balance cost. Every packet has capacity `ceil(C / M)`, with zero padding. Calibration runs once before recovery training; deployment uses the fixed graph and packet map.
 
-- **Byte budget.** The real-valued parity equations alone do not specify an eight-bit packet representation. The default implementation quantizes each parity row to uint8 using bounds derived from its coefficients: `low = 255 sum(min(gamma, 0))`, `scale = sum(abs(gamma))`. These scales are fixed by the profile and need no per-sample metadata. Straight-through rounding is used during training. GraphFEC, RLC, RS and UEP then transmit the same data/parity payload bytes and 42-byte headers. Parity quantization introduces noise, so real-valued full-rank exact recovery is a property of the unquantized solver, not a claim about uint8 parity. `parity_precision=float32` removes this rounding but spends four bytes per real parity symbol, and is reported with its larger byte budget.
-- **Recovery.** Coarse decoding solves `(GᵀMG + eta L + ridge I) U = GᵀMY`. Received systematic channels are restored exactly to their quantized values after both coarse recovery and refinement. Each refinement block concatenates normalized graph messages with channel-reception masks, then applies a depthwise 3 × 3 convolution and a two-layer 1 × 1 bottleneck. Graph aggregation follows stored sparse edges. The evaluation cache stores the solved linear operator for each mask, bounded by `cache_size`; it is cleared when training mode changes.
-- **Calibration.** EMA updates are applied to batch first/second moments, not to sample-specific deployment graphs. The edge backbone is frozen after clean training, so calibration and the interleaver run once before recovery training. The `static_graph` variant uses exact aggregate calibration moments; all deployed graphs are fixed. Per-channel min/max ranges, balance weight, loss weights, bottleneck size and clean-training schedules are explicit implementation conventions.
-- **Baselines and neural-only recovery.** UEP implements the saliency-allocation principle with two separately coded groups. Random linear coding uses real Gaussian coefficients. Neural-only uses normalized backprojection of all received equations as its initializer; it does not solve the normal equations. These definitions make the executable comparisons precise.
-- **Data and measurements.** ImageNet-100 has an explicit selectable class list because the paper does not supply one. The trace reader preserves measured events rather than rescaling them. Local logical packets can exceed a network MTU; a network application must choose packetization/fragmentation for its transport and count the resulting headers. CRC32 detects corruption; it does not provide authentication or encryption.
+**Parity precision.** Each real parity row is quantized to uint8 using coefficient-derived bounds: `low = 255 sum(min(gamma, 0))` and `scale = sum(abs(gamma))`. The profile determines these scales, and training uses straight-through rounding. At the same `M` and `R`, GraphFEC, RLC, RS, and UEP have equal payload and header budgets. This quantization adds error to the real-valued recovery equations. `parity_precision=float32` retains real parity values and uses four bytes per parity symbol; byte metrics include the increase.
 
-Full real-data training, accuracy comparisons, and hardware/network experiments are left to the commands above. The repository's automated validation covers numerical invariants, actual split shapes, and the complete small synthetic workflow.
+**Recovery.** The coarse decoder solves `(GᵀMG + eta L + ridge I) U = GᵀMY`. Two refinement blocks combine normalized graph messages and reception masks through a depthwise 3 × 3 convolution and a 1 × 1 bottleneck. Received systematic channels keep their quantized values throughout recovery. Evaluation caches the solved operator for each reception mask, up to `cache_size` entries.
+
+**Transport and timing.** Datagrams represent logical packets, which can exceed a network MTU. Network deployments need to account for fragmentation and transport headers. CRC32 checks corruption. The included benchmark measures local computation; energy and end-to-end network performance require measurements on the target devices.
+
+## Tests
+
+```bash
+python -m pip install -e ".[dev]"
+pytest -q
+```
+
+Tests cover correlation estimates, packet assignment and padding, quantization bounds, erasure recovery, training gradients, dataset labels and holdouts, loss-channel statistics, bootstrap intervals, split-tensor shapes, and packet validation. CI runs the tests and the synthetic workflow on Python 3.11 and 3.13.
 
 ## Code map
 
