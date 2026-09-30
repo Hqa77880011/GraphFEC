@@ -1,0 +1,23 @@
+{
+  "dataset": "synthetic",
+  "data_root": "runs/smoke/data",
+  "run_dir": "runs/smoke",
+  "backbone": "tiny",
+  "image_size": 16,
+  "num_classes": 3,
+  "device": "cpu",
+  "batch_size": 8,
+  "clean_epochs": 1,
+  "recovery_epochs": 1,
+  "finetune_epochs": 1,
+  "calibration_samples": 24,
+  "saliency_samples": 6,
+  "packets": 4,
+  "parity": 2,
+  "neighbors": 3,
+  "sparsity": 3,
+  "bottleneck": 4,
+  "synthetic_train": 30,
+  "synthetic_test": 12,
+  "loss_rates": [0.0, 0.1, 0.3]
+}

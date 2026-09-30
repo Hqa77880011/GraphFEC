@@ -1,0 +1,17 @@
+/ICPADS_ICPADS-6726/
+/data/
+/runs/
+/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+/build/
+/dist/
+.env
+.env.*
+*.pt
+*.pth
+*.npz
+*.log

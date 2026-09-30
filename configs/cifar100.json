@@ -1,0 +1,21 @@
+{
+  "dataset": "cifar100",
+  "data_root": "data/cifar100",
+  "run_dir": "runs/cifar100",
+  "backbone": "resnet18",
+  "image_size": 32,
+  "num_classes": 100,
+  "split_stage": 2,
+  "clean_epochs": 200,
+  "clean_lr": 0.1,
+  "recovery_epochs": 120,
+  "finetune_epochs": 20,
+  "batch_size": 128,
+  "packets": 20,
+  "parity": 4,
+  "neighbors": 8,
+  "sparsity": 8,
+  "eta": 0.001,
+  "beta": 0.95,
+  "seed": 17
+}

@@ -1,0 +1,12 @@
+{
+  "dataset": "tinyimagenet",
+  "data_root": "data/tiny-imagenet-200",
+  "run_dir": "runs/tinyimagenet",
+  "backbone": "mobilenet_v3_large",
+  "image_size": 64,
+  "num_classes": 200,
+  "clean_epochs": 200,
+  "clean_lr": 0.05,
+  "batch_size": 128,
+  "seed": 17
+}

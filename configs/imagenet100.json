@@ -1,0 +1,12 @@
+{
+  "dataset": "imagenet100",
+  "data_root": "data/imagenet",
+  "run_dir": "runs/imagenet100",
+  "backbone": "convnext_tiny",
+  "image_size": 224,
+  "num_classes": 100,
+  "clean_epochs": 200,
+  "clean_lr": 0.05,
+  "batch_size": 32,
+  "seed": 17
+}
